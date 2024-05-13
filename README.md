@@ -1,1 +1,1 @@
-## project on Multimodel fusion in amritime environment
+## Project on multimodel fusion

@@ -8,7 +8,8 @@
 # Licensed to PSF under a Contributor Agreement.
 #
 
-__all__ = [ 'BaseManager', 'SyncManager', 'BaseProxy', 'Token' ]
+__all__ = [ 'BaseManager', 'SyncManager', 'BaseProxy', 'Token',
+            'SharedMemoryManager' ]
 
 #
 # Imports
@@ -20,7 +21,6 @@ import signal
 import array
 import queue
 import time
-import types
 import os
 from os import getpid
 
@@ -34,11 +34,9 @@ from . import util
 from . import get_context
 try:
     from . import shared_memory
+    HAS_SHMEM = True
 except ImportError:
     HAS_SHMEM = False
-else:
-    HAS_SHMEM = True
-    __all__.append('SharedMemoryManager')
 
 #
 # Register some things for pickling
@@ -61,7 +59,7 @@ if view_types[0] is not list:       # only needed in Py3.0
 
 class Token(object):
     '''
-    Type to uniquely identify a shared object
+    Type to uniquely indentify a shared object
     '''
     __slots__ = ('typeid', 'address', 'id')
 
@@ -193,8 +191,11 @@ class Server(object):
             t.daemon = True
             t.start()
 
-    def _handle_request(self, c):
-        request = None
+    def handle_request(self, c):
+        '''
+        Handle a new connection
+        '''
+        funcname = result = request = None
         try:
             connection.deliver_challenge(c, self.authkey)
             connection.answer_challenge(c, self.authkey)
@@ -211,7 +212,6 @@ class Server(object):
                 msg = ('#TRACEBACK', format_exc())
             else:
                 msg = ('#RETURN', result)
-
         try:
             c.send(msg)
         except Exception as e:
@@ -223,17 +223,7 @@ class Server(object):
             util.info(' ... request was %r', request)
             util.info(' ... exception was %r', e)
 
-    def handle_request(self, conn):
-        '''
-        Handle a new connection
-        '''
-        try:
-            self._handle_request(conn)
-        except SystemExit:
-            # Server.serve_client() calls sys.exit(0) on EOF
-            pass
-        finally:
-            conn.close()
+        c.close()
 
     def serve_client(self, conn):
         '''
@@ -258,7 +248,7 @@ class Server(object):
                     try:
                         obj, exposed, gettypeid = \
                             self.id_to_local_proxy_obj[ident]
-                    except KeyError:
+                    except KeyError as second_ke:
                         raise ke
 
                 if methodname not in exposed:
@@ -306,7 +296,7 @@ class Server(object):
             try:
                 try:
                     send(msg)
-                except Exception:
+                except Exception as e:
                     send(('#UNSERIALIZABLE', format_exc()))
             except Exception as e:
                 util.info('exception in thread serving %r',
@@ -370,10 +360,36 @@ class Server(object):
         finally:
             self.stop_event.set()
 
-    def create(self, c, typeid, /, *args, **kwds):
+    def create(*args, **kwds):
         '''
         Create a new shared object and return its id
         '''
+        if len(args) >= 3:
+            self, c, typeid, *args = args
+        elif not args:
+            raise TypeError("descriptor 'create' of 'Server' object "
+                            "needs an argument")
+        else:
+            if 'typeid' not in kwds:
+                raise TypeError('create expected at least 2 positional '
+                                'arguments, got %d' % (len(args)-1))
+            typeid = kwds.pop('typeid')
+            if len(args) >= 2:
+                self, c, *args = args
+                import warnings
+                warnings.warn("Passing 'typeid' as keyword argument is deprecated",
+                              DeprecationWarning, stacklevel=2)
+            else:
+                if 'c' not in kwds:
+                    raise TypeError('create expected at least 2 positional '
+                                    'arguments, got %d' % (len(args)-1))
+                c = kwds.pop('c')
+                self, *args = args
+                import warnings
+                warnings.warn("Passing 'c' as keyword argument is deprecated",
+                              DeprecationWarning, stacklevel=2)
+        args = tuple(args)
+
         with self.mutex:
             callable, exposed, method_to_typeid, proxytype = \
                       self.registry[typeid]
@@ -405,6 +421,7 @@ class Server(object):
 
         self.incref(c, ident)
         return ident, tuple(exposed)
+    create.__text_signature__ = '($self, c, typeid, /, *args, **kwds)'
 
     def get_methods(self, c, token):
         '''
@@ -804,7 +821,7 @@ class BaseProxy(object):
 
     def _callmethod(self, methodname, args=(), kwds={}):
         '''
-        Try to call a method of the referent and return a copy of the result
+        Try to call a method of the referrent and return a copy of the result
         '''
         try:
             conn = self._tls.connection
@@ -968,7 +985,7 @@ def MakeProxyType(name, exposed, _cache={}):
 
 
 def AutoProxy(token, serializer, manager=None, authkey=None,
-              exposed=None, incref=True, manager_owned=False):
+              exposed=None, incref=True):
     '''
     Return an auto-proxy for `token`
     '''
@@ -988,7 +1005,7 @@ def AutoProxy(token, serializer, manager=None, authkey=None,
 
     ProxyType = MakeProxyType('AutoProxy[%s]' % token.typeid, exposed)
     proxy = ProxyType(token, serializer, manager=manager, authkey=authkey,
-                      incref=incref, manager_owned=manager_owned)
+                      incref=incref)
     proxy._isauto = True
     return proxy
 
@@ -1139,8 +1156,6 @@ class ValueProxy(BaseProxy):
         return self._callmethod('set', (value,))
     value = property(get, set)
 
-    __class_getitem__ = classmethod(types.GenericAlias)
-
 
 BaseListProxy = MakeProxyType('BaseListProxy', (
     '__add__', '__contains__', '__delitem__', '__getitem__', '__len__',
@@ -1274,23 +1289,30 @@ if HAS_SHMEM:
 
         def __init__(self, *args, **kwargs):
             Server.__init__(self, *args, **kwargs)
-            address = self.address
-            # The address of Linux abstract namespaces can be bytes
-            if isinstance(address, bytes):
-                address = os.fsdecode(address)
             self.shared_memory_context = \
-                _SharedMemoryTracker(f"shm_{address}_{getpid()}")
+                _SharedMemoryTracker(f"shmm_{self.address}_{getpid()}")
             util.debug(f"SharedMemoryServer started by pid {getpid()}")
 
-        def create(self, c, typeid, /, *args, **kwargs):
+        def create(*args, **kwargs):
             """Create a new distributed-shared object (not backed by a shared
             memory block) and return its id to be used in a Proxy Object."""
             # Unless set up as a shared proxy, don't make shared_memory_context
             # a standard part of kwargs.  This makes things easier for supplying
             # simple functions.
+            if len(args) >= 3:
+                typeod = args[2]
+            elif 'typeid' in kwargs:
+                typeid = kwargs['typeid']
+            elif not args:
+                raise TypeError("descriptor 'create' of 'SharedMemoryServer' "
+                                "object needs an argument")
+            else:
+                raise TypeError('create expected at least 2 positional '
+                                'arguments, got %d' % (len(args)-1))
             if hasattr(self.registry[typeid][-1], "_shared_memory_proxy"):
                 kwargs['shared_memory_context'] = self.shared_memory_context
-            return Server.create(self, c, typeid, *args, **kwargs)
+            return Server.create(*args, **kwargs)
+        create.__text_signature__ = '($self, c, typeid, /, *args, **kwargs)'
 
         def shutdown(self, c):
             "Call unlink() on all tracked shared memory, terminate the Server."
