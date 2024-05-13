@@ -1,0 +1,6 @@
+README.md
+setup.py
+multimodel_fusion.egg-info/PKG-INFO
+multimodel_fusion.egg-info/SOURCES.txt
+multimodel_fusion.egg-info/dependency_links.txt
+multimodel_fusion.egg-info/top_level.txt
