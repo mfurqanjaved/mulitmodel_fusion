@@ -1,0 +1,8 @@
+[ 2024-05-19 06:16:06,381 ] 26 root - INFO - enter the data ingestion method of component
+[ 2024-05-19 06:16:06,385 ] 30 root - INFO - read teh dataset as dataframe
+[ 2024-05-19 06:16:06,389 ] 34 root - INFO - train test split initiated
+[ 2024-05-19 06:16:06,394 ] 39 root - INFO - ingestion of data is completed
+[ 2024-05-19 06:16:06,411 ] 57 root - INFO - read the train and test data
+[ 2024-05-19 06:16:06,411 ] 58 root - INFO - initiate the preprocessor
+[ 2024-05-19 06:16:06,411 ] 45 root - INFO - column transformer initiated
+[ 2024-05-19 06:16:06,412 ] 69 root - INFO - Applying the preprocessor on the input features
